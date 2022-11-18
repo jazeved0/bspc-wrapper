@@ -1,1 +1,3 @@
-test_resources/*.htm linguist-vendored
+# Mark the 'bspc_readme_license.htm' file as vendored to prevent HTML from
+# appearing as one of the repository's languages.
+test_resources/bspc_readme_license.htm linguist-vendored
