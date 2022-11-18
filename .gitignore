@@ -1,0 +1,5 @@
+# Ignore lock file
+Cargo.lock
+
+# Ignore target directory
+target/
