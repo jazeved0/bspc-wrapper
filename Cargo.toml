@@ -11,8 +11,10 @@ readme = "README.md"
 # but this wrapper doesn't dynamically link or use any of the code from 'bspc'
 # (instead, it just runs the 'bspc' binary as an opaque child process and deals
 # with the input/output via CLI args, the filesystem, and the exit code).
-# Moreover, the wrapper does not re-distribute 'bspc' in any way (which must
-# be downloaded separately by the user).
+# Moreover, the library itself does not redistribute 'bspc' in any way (which
+# must be downloaded separately by the user).
+# This repository does contain a copy of the 'bspc' binary, but it is only used
+# for testing purposes.
 license = "MIT OR Apache-2.0"
 
 [lib]
@@ -21,9 +23,10 @@ name = "bspc"
 [dependencies]
 abort-on-drop = "0.2"
 derive_builder = "0.11"
-futures = "0.3"
 tempfile = "3.3"
 thiserror = "1"
 tokio = { version = "1", features = ["process", "fs", "macros", "io-util", "rt"], default-features = true }
-tokio-stream = { version = "0.1", features = ["io-util"], default-features = true }
 tokio-util = { version = "0.7", features = [], default-features = true }
+
+[dev-dependencies]
+tokio-test = "0.4.2"

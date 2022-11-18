@@ -9,6 +9,7 @@ const NO_FILES_FOUND: &str = "no files found";
 // [sic]
 const UNKNOWN_PARAMETER_PREFIX: &str = "unknows parameter ";
 
+/// A single parsed log line from the BSPC child process.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLine {
     Info(String),
@@ -42,8 +43,9 @@ impl From<String> for LogLine {
 }
 
 impl LogLine {
+    /// Returns the original message of this log line.
     #[must_use]
-    pub fn content(&self) -> Cow<'_, str> {
+    pub fn original(&self) -> Cow<'_, str> {
         match self {
             Self::Info(content) => Cow::Borrowed(content),
             Self::Warning(line) => Cow::Owned(line.content()),

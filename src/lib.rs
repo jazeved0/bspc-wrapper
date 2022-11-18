@@ -1,3 +1,100 @@
+//! This library wraps around the [bspc](https://github.com/bnoordhuis/bspc) Quake utility tool
+//! to make it easier to use it from Rust.
+//! It does so by spawning a child process and asynchronously waiting for its output.
+//!
+//! Some features include:
+//! - setting up a temporary directory to store input/output files in
+//! - parsing output logs to look for errors/warnings
+//! - streaming the output logs in real-time (via `OptionsBuilder::log_stream`)
+//!
+//! # Links
+//!
+//! The BSPC tool itself is not included with the library.
+//! Instead, it needs to already exist in the filesystem before the library is used.
+//!
+//! - Old binary downloads for v1.2: [link](https://web.archive.org/web/20011023020820/http://www.botepidemic.com:80/gladiator/download.shtml)
+//! - Source: [bnoordhuis/bspc](https://github.com/bnoordhuis/bspc)
+//! - Fork with more recent commits: [TTimo/bspc](https://github.com/TTimo/bspc)
+//!
+//! # Example
+//!
+//! Basic example showing the conversion of a Quake BSP file to a MAP file:
+//!
+//! ```rust
+//! use bspc::{Command, Options};
+//! use tokio_util::sync::CancellationToken;
+//!
+//! # tokio_test::block_on(async {
+//! let bsp_contents = b"...";
+//! let result = bspc::convert(
+//!     "./test_resources/bspci386",
+//!     Command::BspToMap(bsp_contents),
+//!     Options::builder()
+//!         .verbose(true)
+//!         .build(),
+//! )
+//! .await;
+//! match result {
+//!     Ok(output) => {
+//!         assert_eq!(output.files.len(), 1);
+//!         println!("{}", output.files[0].name);
+//!         println!("{}", String::from_utf8_lossy(&output.files[0].contents));
+//!     }
+//!     Err(err) => {
+//!         println!("Conversion failed: {}", err);
+//!     }
+//! }
+//! # })
+//! ```
+//!
+//! ## Example with cancellation
+//!
+//! The following snippet demonstrates how to cancel the conversion (in this
+//! case, using a timeout) via the cancellation token. Note that the
+//! cancellation is not done simply by dropping the future (as is normally done),
+//! since we want to ensure that the child process is killed and the temporary
+//! directory deleted before the future completes.
+//!
+//! ```rust
+//! use bspc::{Command, Options, ConversionError};
+//! use tokio_util::sync::CancellationToken;
+//!
+//! # tokio_test::block_on(async {
+//! let bsp_contents = b"...";
+//! let cancel_token = CancellationToken::new();
+//! let cancel_task = {
+//!     let cancel_token = cancel_token.clone();
+//!     tokio::spawn(async move {
+//!         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+//!         cancel_token.cancel();
+//!     })
+//! };
+//! let result = bspc::convert(
+//!     "./test_resources/bspci386",
+//!     Command::BspToMap(bsp_contents),
+//!     Options::builder()
+//!         .verbose(true)
+//!         .cancellation_token(cancel_token)
+//!         .build(),
+//! )
+//! .await;
+//! match result {
+//!     Ok(output) => {
+//!         assert_eq!(output.files.len(), 1);
+//!         println!("{}", output.files[0].name);
+//!         println!("{}", String::from_utf8_lossy(&output.files[0].contents));
+//!     }
+//!     Err(ConversionError::Cancelled) => {
+//!         println!("Conversion timed out after 10 seconds");
+//!     }
+//!     Err(err) => {
+//!         println!("Conversion failed: {}", err);
+//!     }
+//! }
+//! # })
+//! ```
+//!
+
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![warn(
     clippy::unwrap_used,
@@ -11,7 +108,9 @@ pub mod logs;
 
 use crate::logs::{LogLine, UnknownArgumentLine};
 use abort_on_drop::ChildTask;
+use derive_builder::UninitializedFieldError;
 use std::ffi::OsString;
+use std::future::Future;
 use std::io::Error as IoError;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
@@ -20,82 +119,129 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc::Sender as MpscSender;
 use tokio_util::sync::CancellationToken;
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+/// Callback used by [`Command::Other`].
+///
+/// Accepts a the temporary directory that can be used to write files to.
+pub type CommandArgumentBuilder = Box<
+    dyn FnOnce(
+            &TempDir,
+        ) -> Box<
+            dyn Future<Output = Result<Vec<OsString>, ConversionError>>
+                + Send
+                + Sync
+                + Unpin
+                // The builder function can't borrow the TempDir argument, but
+                // this is fine because any operations on it are synchronous.
+                + 'static,
+        > + Send
+        + Sync,
+>;
+
+/// The subcommand to pass to the BSPC executable.
+///
+/// If this is one of the standard subcommands (i.e. not `Other`), then the
+/// command accepts a byte slice containing the contents of the input file
+/// that should be converted. This library handles writing the input file to
+/// a temporary directory before invoking the BSPC executable.
 pub enum Command<'a> {
+    /// Corresponds to the `-map2bsp` subcommand.
     MapToBsp(&'a [u8]),
+    /// Corresponds to the `-map2aas` subcommand.
     MapToAas(&'a [u8]),
+    /// Corresponds to the `-bsp2map` subcommand.
     BspToMap(&'a [u8]),
+    /// Corresponds to the `-bsp2bsp` subcommand.
     BspToBsp(&'a [u8]),
+    /// Corresponds to the `-bsp2aas` subcommand.
     BspToAas(&'a [u8]),
+    /// Allows sending an arbitrary command to the BSPC executable.
+    /// This is an asynchronous callback that accepts the temporary directory
+    /// that can be used to write files to, and returns a future that resolves
+    /// to a list of arguments to pass to the BSPC executable (or an error).
+    Other(CommandArgumentBuilder),
 }
 
 impl<'a> Command<'a> {
-    #[must_use]
-    const fn input_extension(&self) -> &'static str {
-        match self {
-            Command::MapToBsp(_) | Command::MapToAas(_) => "map",
-            Command::BspToMap(_) | Command::BspToBsp(_) | Command::BspToAas(_) => "bsp",
+    async fn try_into_args(self, temp_dir: &TempDir) -> Result<Vec<OsString>, ConversionError> {
+        if let Command::Other(build_arguments) = self {
+            build_arguments(temp_dir).await
+        } else {
+            let input_file_extension = match self {
+                Command::MapToBsp(_) | Command::MapToAas(_) => "map",
+                Command::BspToMap(_) | Command::BspToBsp(_) | Command::BspToAas(_) => "bsp",
+                Command::Other(_) => unreachable!(),
+            };
+            let input_file_contents = match self {
+                Command::MapToBsp(contents)
+                | Command::MapToAas(contents)
+                | Command::BspToMap(contents)
+                | Command::BspToBsp(contents)
+                | Command::BspToAas(contents) => contents,
+                Command::Other(_) => unreachable!(),
+            };
+            let subcommand = match self {
+                Command::MapToBsp(_) => "-map2bsp",
+                Command::MapToAas(_) => "-map2aas",
+                Command::BspToMap(_) => "-bsp2map",
+                Command::BspToBsp(_) => "-bsp2bsp",
+                Command::BspToAas(_) => "-bsp2aas",
+                Command::Other { .. } => unreachable!(),
+            };
+
+            // Write the input file to a temporary file.
+            let input_file_path = temp_dir
+                .path()
+                .join(format!("input.{}", input_file_extension));
+            tokio::fs::write(&input_file_path, input_file_contents)
+                .await
+                .map_err(|err| ConversionError::TempDirectoryIo(err, input_file_path.clone()))?;
+
+            let args = vec![subcommand.into(), input_file_path.clone().into()];
+            Ok(args)
         }
-    }
-
-    async fn prepare_args(
-        &self,
-        temp_dir: &TempDir,
-    ) -> Result<(Vec<OsString>, PathBuf), ConversionError> {
-        // Write the input file to a temporary file.
-        let input_file_path = temp_dir
-            .path()
-            .join(format!("input.{}", self.input_extension()));
-        let input_contents = match self {
-            Command::MapToBsp(contents)
-            | Command::MapToAas(contents)
-            | Command::BspToMap(contents)
-            | Command::BspToBsp(contents)
-            | Command::BspToAas(contents) => contents,
-        };
-        tokio::fs::write(&input_file_path, input_contents)
-            .await
-            .map_err(|err| ConversionError::TempDirectoryIo(err, input_file_path.clone()))?;
-
-        let subcommand = match self {
-            Command::MapToBsp(_) => "-map2bsp",
-            Command::MapToAas(_) => "-map2aas",
-            Command::BspToMap(_) => "-bsp2map",
-            Command::BspToBsp(_) => "-bsp2bsp",
-            Command::BspToAas(_) => "-bsp2aas",
-        };
-
-        Ok((
-            vec![subcommand.into(), input_file_path.clone().into()],
-            input_file_path,
-        ))
     }
 }
 
+/// Options for the conversion process.
+///
+/// Some of these are passed directly to the BSPC executable.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(derive_builder::Builder)]
-#[builder(build_fn(name = "fallible_build"))]
+#[builder(build_fn(private, name = "fallible_build", error = "PrivateOptionsBuilderError"))]
 pub struct Options {
+    /// Whether to use verbose logging.
+    ///
+    /// If this is `false`, then the `-noverbose` flag will be passed to the
+    /// BSPC executable.
     #[builder(default = "false")]
     pub verbose: bool,
+    /// The number of threads to use for the conversion. By default,
+    /// multi-threading is disabled (equivalent to setting this to `1`).
+    ///
+    /// This is passed to the BSPC executable via the `-threads` flag.
     #[builder(default, setter(strip_option))]
     pub threads: Option<usize>,
-    #[builder(default = "false")]
-    pub no_brush_merge: bool,
-    #[builder(default = "false")]
-    pub no_liquids: bool,
-    #[builder(default = "false")]
-    pub free_bsp_tree: bool,
-    #[builder(default = "false")]
-    pub disable_brush_chopping: bool,
-    #[builder(default = "false")]
-    pub breadth_first_bsp: bool,
+    /// A cancellation token that can be used to cancel the conversion
+    /// (instead of dropping the future). See the docs on [`convert`] for
+    /// more information.
     #[builder(default, setter(strip_option))]
     pub cancellation_token: Option<CancellationToken>,
+    /// An optional channel to send log lines to as they get logged.
     #[builder(default, setter(strip_option))]
     pub log_stream: Option<MpscSender<LogLine>>,
-    #[builder(setter(custom))]
+    /// Additional command-line arguments to pass to the BSPC executable.
+    /// These are added at the end, after all other arguments.
+    #[builder(default, setter(custom))]
     pub additional_args: Vec<OsString>,
+}
+
+#[derive(Debug)]
+struct PrivateOptionsBuilderError(UninitializedFieldError);
+
+impl From<UninitializedFieldError> for PrivateOptionsBuilderError {
+    fn from(err: UninitializedFieldError) -> Self {
+        Self(err)
+    }
 }
 
 impl Options {
@@ -106,6 +252,14 @@ impl Options {
 }
 
 impl OptionsBuilder {
+    #[must_use]
+    pub fn build(&mut self) -> Options {
+        self.fallible_build()
+            .expect("OptionsBuilder::build() should not fail")
+    }
+
+    /// Adds additional command-line arguments to pass to the BSPC executable.
+    /// These are added at the end, after all other arguments.
     pub fn additional_args<I, S>(&mut self, args: I) -> &mut Self
     where
         I: IntoIterator<Item = S>,
@@ -117,6 +271,8 @@ impl OptionsBuilder {
         self
     }
 
+    /// Adds an additional command-line argument to pass to the BSPC executable.
+    /// This is added at the end, after all other arguments.
     pub fn additional_arg<S>(&mut self, arg: S) -> &mut Self
     where
         S: Into<OsString>,
@@ -125,12 +281,6 @@ impl OptionsBuilder {
             .get_or_insert_with(Vec::new)
             .push(arg.into());
         self
-    }
-
-    #[must_use]
-    pub fn build(&mut self) -> Options {
-        self.fallible_build()
-            .expect("OptionsBuilder::build() should not fail")
     }
 }
 
@@ -147,11 +297,7 @@ impl Options {
         //    output <output path>                 = set output path
         //    noverbose                            = disable verbose output
         //    threads                              = number of threads to use
-        //    breath                               = breath first bsp building
-        //    nobrushmerge                         = don't merge brushes
-        //    noliquids                            = don't write liquids to map
-        //    freetree                             = free the bsp tree
-        //    nocsg                                = disables brush chopping
+        //    ... the remaining arguments depend on the version used
         let mut args: Vec<OsString> = Vec::new();
         if !self.verbose {
             args.push("-noverbose".into());
@@ -160,65 +306,77 @@ impl Options {
             args.push("-threads".into());
             args.push(threads.to_string().into());
         }
-        if self.no_brush_merge {
-            args.push("-nobrushmerge".into());
-        }
-        if self.no_liquids {
-            args.push("-noliquids".into());
-        }
-        if self.free_bsp_tree {
-            args.push("-freetree".into());
-        }
-        if self.disable_brush_chopping {
-            args.push("-nocsg".into());
-        }
-        if self.breadth_first_bsp {
-            // [sic]
-            args.push("-breath".into());
-        }
         args.extend(self.additional_args);
         args
     }
 }
 
+/// Full output of the child process, including the exit code, log, and any
+/// output files.
+///
+/// This also includes the command-line arguments that were passed, for
+/// diagnostic purposes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output {
-    exit: ExitStatus,
-    exit_code: Option<i32>,
-    files: Vec<OutputFile>,
-    args: Vec<String>,
-    logs: Vec<LogLine>,
+    /// The exit status of the child process.
+    pub exit: ExitStatus,
+    /// The exit code corresponding to the exit status, if one exists.
+    ///
+    /// See the docs on [`std::process::ExitStatus::code`].
+    pub exit_code: Option<i32>,
+    /// All output files that the child process produced.
+    pub files: Vec<OutputFile>,
+    /// The command-line arguments that were passed to the child process.
+    pub args: Vec<String>,
+    /// The log output of the child process, as a list of parsed log lines.
+    pub logs: Vec<LogLine>,
 }
 
+/// Error type returned by [`convert`].
 #[derive(Debug, thiserror::Error)]
 pub enum ConversionError {
+    /// The provided path to the BSPC executable does not exist or is not a
+    /// file.
     #[error("provided path to bspc executable (\"{0}\") does not exist or is not a file")]
     ExecutableNotFound(PathBuf),
+    /// Failed to create a temporary directory to store inputs/outputs.
     #[error("failed to create a temporary directory to store inputs/outputs")]
     TempDirectoryCreationFailed(#[source] IoError),
+    /// Failed to read/write to the temporary directory storing inputs/outputs.
     #[error("failed to read/write to the temporary directory (at \"{1}\") storing inputs/outputs")]
     TempDirectoryIo(#[source] IoError, PathBuf),
+    /// Failed to start the child BSPC process.
     #[error("failed to start child \"bspc\" process")]
     ProcessStartFailure(#[source] IoError),
+    /// Failed to wait for the child BSPC process to exit.
     #[error("failed to wait for child \"bspc\" process to exit")]
     ProcessWaitFailure(#[source] IoError),
+    /// The conversion process was cancelled via the cancellation token.
     #[error("conversion was cancelled by the cancellation token")]
     Cancelled,
+    /// The child BSPC process was provided an unknown argument.
     #[error("child \"bspc\" process was provided unknown argument '{unknown_argument}': full argument list: {args:?}")]
     UnknownArgument {
+        /// The offending argument.
         unknown_argument: String,
+        /// All arguments passed to the child BSPC process.
         args: Vec<String>,
     },
-    #[error("the temporary input written to \"{0}\" was not found by \"bspc\": {1:?}")]
-    TemporaryInputFileNotFound(PathBuf, Output),
+    /// The child BSPC process did find any input files when it ran.
+    ///
+    /// If a standard command was used, then this indicates that the temporary
+    /// file may have been deleted before BPSC ran.
+    #[error("\"bspc\" did not find any files when it ran the conversion process. If a standard command was used, then this indicates that the temporary file may have been deleted before \"bspc\" ran: {0:?}")]
+    NoInputFilesFound(Output),
+    /// The child BSPC process exited with a non-zero exit code.
     #[error("child \"bspc\" process exited with a non-zero exit code: {0:?}")]
     ProcessExitFailure(Output),
+    /// The child BSPC process resulted in no output files.
     #[error("child \"bspc\" process resulted in no output files: {0:?}")]
     NoOutputFiles(Output),
-    #[error("child \"bspc\" process resulted in more than 1 output file: {0:?}")]
-    MultipleOutputFiles(Output),
 }
 
+/// A single output file produced by the BSPC process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputFile {
     pub name: String,
@@ -236,6 +394,11 @@ pub struct OutputFile {
 ///
 /// To time-out the child process operation (or otherwise cancel it), pass a
 /// [`CancellationToken`] to the [`Options`] argument.
+///
+/// # Executable
+///
+/// The BSPC executable must already exist in the filesystem before calling
+/// this function.
 ///
 /// # Errors
 ///
@@ -281,7 +444,7 @@ pub async fn convert(
         .map_err(|e| ConversionError::TempDirectoryIo(e, output_directory_path.clone()))?;
 
     let mut args: Vec<OsString> = Vec::new();
-    let (command_args, temp_input_file_path) = cmd.prepare_args(&temp_dir).await?;
+    let command_args = cmd.try_into_args(&temp_dir).await?;
     args.extend(command_args);
     args.push("-output".into());
     args.push(output_directory_path.as_os_str().to_owned());
@@ -295,6 +458,8 @@ pub async fn convert(
     // Spawn the child process
     let mut child = TokioCommand::new(executable_path)
         .env_clear()
+        // Use the temporary directory as the working directory, since BSPC
+        // also writes a log file to the working directory.
         .current_dir(temp_dir.path())
         .stdin(Stdio::null())
         // BSPC writes all logs to stdout
@@ -401,10 +566,7 @@ pub async fn convert(
     };
 
     if no_files_found {
-        return Err(ConversionError::TemporaryInputFileNotFound(
-            temp_input_file_path,
-            output,
-        ));
+        return Err(ConversionError::NoInputFilesFound(output));
     }
 
     if !output.exit.success() {
