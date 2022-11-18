@@ -1,4 +1,14 @@
-# quake-bspc
+# quake-bspc &emsp; [![License]][apache] [![Latest Version]][crates.io] [![Documentation]][docs.rs]
+
+[License]: https://img.shields.io/crates/l/quake-bspc.svg
+[apache]: LICENSE-APACHE
+
+[Latest Version]: https://img.shields.io/crates/v/quake-bspc.svg
+[crates.io]: https://crates.io/crates/quake-bspc
+
+[Documentation]: https://docs.rs/quake-bspc/badge.svg
+[docs.rs]: https://docs.rs/quake-bspc
+
 
 This library wraps around the [bspc](https://github.com/bnoordhuis/bspc) Quake utility tool
 to make it easier to use it from Rust.
