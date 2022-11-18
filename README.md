@@ -1,4 +1,4 @@
-# bspc-wrapper
+# quake-bspc
 
 This library wraps around the [bspc](https://github.com/bnoordhuis/bspc) Quake utility tool
 to make it easier to use it from Rust.
