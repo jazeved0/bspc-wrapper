@@ -6,6 +6,7 @@ authors = ["Joseph Azevedo <jazevedo620@gmail.com>"]
 description = """A simple asynchronous wrapper for running the Quake utility \
 tool 'bspc' as a child process, from Rust"""
 readme = "README.md"
+repository = "https://github.com/jazeved0/quake-bspc"
 # 'bspc' itself is licensed under GPL
 # (https://github.com/bnoordhuis/bspc/blob/master/LICENSE),
 # but this wrapper doesn't dynamically link or use any of the code from 'bspc'
