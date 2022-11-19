@@ -1,4 +1,8 @@
-# quake-bspc &emsp; [![License]][apache] [![Latest Version]][crates.io] [![Documentation]][docs.rs]
+# quake-bspc
+
+[![License]][apache]
+[![Latest Version]][crates.io]
+[![Documentation]][docs.rs]
 
 [License]: https://img.shields.io/crates/l/quake-bspc.svg
 [apache]: LICENSE-APACHE
