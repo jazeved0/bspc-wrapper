@@ -37,7 +37,7 @@ Instead, it needs to already exist in the filesystem before the library is used.
 
 Basic example showing the conversion of a Quake BSP file to a MAP file:
 
-```rs
+```rust
 use bspc::{Command, Options};
 use tokio_util::sync::CancellationToken;
 
