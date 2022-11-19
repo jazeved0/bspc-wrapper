@@ -107,7 +107,6 @@
 pub mod logs;
 
 use crate::logs::{LogLine, UnknownArgumentLine};
-use abort_on_drop::ChildTask;
 use derive_builder::UninitializedFieldError;
 use std::ffi::OsString;
 use std::future::Future;
@@ -469,31 +468,49 @@ pub async fn convert(
         .spawn()
         .map_err(ConversionError::ProcessStartFailure)?;
 
-    let stdout = child
-        .stdout
-        .take()
-        .expect("child should have a piped stdout stream");
-    let consume_log_task: ChildTask<Result<Vec<LogLine>, IoError>> =
-        ChildTask::from(tokio::spawn(async move {
-            crate::logs::collect_logs(stdout, log_stream).await
-        }));
+    let wait_with_output_future = async {
+        let mut stdout_pipe = child
+            .stdout
+            .take()
+            .expect("child should have a piped stdout stream");
 
-    // Wait for the child process to exit, or for the cancellation token to be
-    // cancelled. Use `wait` instead of `wait_with_output` because the latter
-    // requires moving the child process into the future, which is incompatible
-    // with cancellation.
-    let exit: ExitStatus = {
+        let wait_future = async {
+            child
+                .wait()
+                .await
+                .map_err(ConversionError::ProcessWaitFailure)
+        };
+        let consume_log_future = async {
+            crate::logs::collect_logs(&mut stdout_pipe, log_stream)
+                .await
+                .map_err(ConversionError::ProcessWaitFailure)
+        };
+
+        let (exit, logs) = tokio::try_join!(wait_future, consume_log_future)?;
+
+        // Drop the pipe after `try_join` to mirror Tokio's implementation of
+        // `Child::wait_with_output`:
+        // https://github.com/tokio-rs/tokio/blob/d65826236b9/tokio/src/process/mod.rs#L1224-L1234
+        drop(stdout_pipe);
+
+        Ok((exit, logs))
+    };
+
+    let (exit_status, log_lines): (ExitStatus, Vec<LogLine>) = {
         #[allow(clippy::redundant_pub_crate)]
-        let cancellation_result: Result<Result<ExitStatus, IoError>, ()> = tokio::select! {
-            result = child.wait() => Ok(result),
+        let cancellation_result: Result<
+            Result<(ExitStatus, Vec<LogLine>), ConversionError>,
+            (),
+        > = tokio::select! {
+            result = wait_with_output_future => Ok(result),
             _ = cancellation_token.cancelled() => Err(()),
         };
         match cancellation_result {
-            Ok(Ok(exit)) => exit,
-            Ok(Err(wait_err)) => {
+            Ok(Ok((exit, log_lines))) => (exit, log_lines),
+            Ok(Err(err)) => {
                 // Try to ensure the child process is killed before returning
                 let _err = child.kill().await;
-                return Err(ConversionError::ProcessWaitFailure(wait_err));
+                return Err(err);
             }
             Err(_) => {
                 // The cancellation token was cancelled, so we should kill the child
@@ -503,10 +520,6 @@ pub async fn convert(
             }
         }
     };
-    let log_lines = consume_log_task
-        .await
-        .expect("log collection task should not panic")
-        .map_err(ConversionError::ProcessWaitFailure)?;
 
     let mut no_files_found: bool = false;
     let mut unknown_argument: Option<UnknownArgumentLine> = None;
@@ -558,8 +571,8 @@ pub async fn convert(
     }
 
     let output = Output {
-        exit_code: exit.code(),
-        exit,
+        exit_code: exit_status.code(),
+        exit: exit_status,
         files: output_files,
         args: debug_args,
         logs: log_lines,

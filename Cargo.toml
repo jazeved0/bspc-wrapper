@@ -22,11 +22,10 @@ license = "MIT OR Apache-2.0"
 name = "bspc"
 
 [dependencies]
-abort-on-drop = "0.2"
 derive_builder = "0.11"
 tempfile = "3.3"
 thiserror = "1"
-tokio = { version = "1", features = ["process", "fs", "macros", "io-util", "rt"], default-features = true }
+tokio = { version = "1", features = ["process", "fs", "macros", "io-util"], default-features = true }
 tokio-util = { version = "0.7", features = [], default-features = true }
 
 [dev-dependencies]
