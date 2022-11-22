@@ -65,7 +65,7 @@
 //! let cancel_task = {
 //!     let cancel_token = cancel_token.clone();
 //!     tokio::spawn(async move {
-//!         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+//!         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 //!         cancel_token.cancel();
 //!     })
 //! };

@@ -14,9 +14,8 @@
 [docs.rs]: https://docs.rs/quake-bspc
 
 
-This library wraps around the [bspc](https://github.com/bnoordhuis/bspc) Quake utility tool
-to make it easier to use it from Rust.
-It does so by spawning a child process and asynchronously waiting for its output.
+This library provides a simple interface around the [bspc](https://github.com/bnoordhuis/bspc) Quake compiler
+by spawning a child process and asynchronously waiting for its output.
 
 Some features include:
 
@@ -66,7 +65,7 @@ match result {
 
 The following snippet demonstrates how to cancel the conversion (in this
 case, using a timeout) via the cancellation token. Note that the
-cancellation is not done simply by dropping the future (as is normally done),
+cancellation is not done simply by dropping the future (as would usually be the case in async Rust),
 since we want to ensure that the child process is killed and the temporary
 directory deleted before the future completes.
 
@@ -79,7 +78,7 @@ let cancel_token = CancellationToken::new();
 let cancel_task = {
     let cancel_token = cancel_token.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         cancel_token.cancel();
     })
 };
