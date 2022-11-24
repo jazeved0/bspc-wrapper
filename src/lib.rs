@@ -336,19 +336,21 @@ pub struct Output {
 pub enum ConversionError {
     /// The provided path to the BSPC executable does not exist or is not a
     /// file.
-    #[error("provided path to bspc executable (\"{0}\") does not exist or is not a file")]
+    #[error("provided path to bspc executable (\"{0}\") does not exist or is not a file: {0}")]
     ExecutableNotFound(PathBuf),
     /// Failed to create a temporary directory to store inputs/outputs.
-    #[error("failed to create a temporary directory to store inputs/outputs")]
+    #[error("failed to create a temporary directory to store inputs/outputs: {0}")]
     TempDirectoryCreationFailed(#[source] IoError),
     /// Failed to read/write to the temporary directory storing inputs/outputs.
-    #[error("failed to read/write to the temporary directory (at \"{1}\") storing inputs/outputs")]
+    #[error(
+        "failed to read/write to the temporary directory (at \"{1}\") storing inputs/outputs: {0}"
+    )]
     TempDirectoryIo(#[source] IoError, PathBuf),
     /// Failed to start the child BSPC process.
-    #[error("failed to start child \"bspc\" process")]
+    #[error("failed to start child \"bspc\" process: {0}")]
     ProcessStartFailure(#[source] IoError),
     /// Failed to wait for the child BSPC process to exit.
-    #[error("failed to wait for child \"bspc\" process to exit")]
+    #[error("failed to wait for child \"bspc\" process to exit: {0}")]
     ProcessWaitFailure(#[source] IoError),
     /// The conversion process was cancelled via the cancellation token.
     #[error("conversion was cancelled by the cancellation token")]
@@ -365,13 +367,13 @@ pub enum ConversionError {
     ///
     /// If a standard command was used, then this indicates that the temporary
     /// file may have been deleted before BPSC ran.
-    #[error("\"bspc\" did not find any files when it ran the conversion process. If a standard command was used, then this indicates that the temporary file may have been deleted before \"bspc\" ran: {0:?}")]
+    #[error("\"bspc\" did not find any files when it ran the conversion process (see logs). If a standard command was used, then this indicates that the temporary file may have been deleted before \"bspc\"")]
     NoInputFilesFound(Output),
     /// The child BSPC process exited with a non-zero exit code.
-    #[error("child \"bspc\" process exited with a non-zero exit code: {0:?}")]
+    #[error("child \"bspc\" process exited with a non-zero exit code {} (see logs)", .0.exit)]
     ProcessExitFailure(Output),
     /// The child BSPC process resulted in no output files.
-    #[error("child \"bspc\" process resulted in no output files: {0:?}")]
+    #[error("child \"bspc\" process resulted in no output files (see logs)")]
     NoOutputFiles(Output),
 }
 
