@@ -30,5 +30,11 @@ thiserror = "1"
 tokio = { version = "1", features = ["process", "fs", "macros", "io-util"], default-features = true }
 tokio-util = { version = "0.7", features = [], default-features = true }
 
+[dependencies.windows]
+version = "0.43"
+features = [
+    "Win32_System_Threading",
+]
+
 [dev-dependencies]
 tokio-test = "0.4.2"

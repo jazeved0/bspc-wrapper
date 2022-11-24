@@ -112,7 +112,7 @@ use std::ffi::OsString;
 use std::future::Future;
 use std::io::Error as IoError;
 use std::path::{Path, PathBuf};
-use std::process::{ExitStatus, Stdio};
+use std::process::{Command as StdCommand, ExitStatus, Stdio};
 use tempfile::{Builder as TempFileBuilder, TempDir};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc::Sender as MpscSender;
@@ -456,8 +456,8 @@ pub async fn convert(
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect::<Vec<_>>();
 
-    // Spawn the child process
-    let mut child = TokioCommand::new(executable_path)
+    let mut command = StdCommand::new(executable_path);
+    command
         .env_clear()
         // Use the temporary directory as the working directory, since BSPC
         // also writes a log file to the working directory.
@@ -466,7 +466,20 @@ pub async fn convert(
         // BSPC writes all logs to stdout
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .args(args)
+        .args(args);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+
+        // On Windows, add the CREATE_NO_WINDOW flag to the process creation
+        // flags, so that the child process does not create a console window.
+        command.creation_flags(CREATE_NO_WINDOW.0);
+    }
+
+    // Spawn the child process
+    let mut child = TokioCommand::from(command)
         .spawn()
         .map_err(ConversionError::ProcessStartFailure)?;
 
