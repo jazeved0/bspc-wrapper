@@ -1,6 +1,6 @@
 [package]
 name = "quake-bspc"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 authors = ["Joseph Azevedo <jazevedo620@gmail.com>"]
 description = """Asynchronous wrapper for running the Quake BSP compiler \
