@@ -232,6 +232,9 @@ pub struct Options {
     /// These are added at the end, after all other arguments.
     #[builder(default, setter(custom))]
     pub additional_args: Vec<OsString>,
+    /// Whether to log the command that is being executed.
+    #[builder(default = "true")]
+    pub log_command: bool,
 }
 
 #[derive(Debug)]
@@ -415,6 +418,7 @@ pub async fn convert(
         .take()
         .unwrap_or_else(CancellationToken::new);
     let log_stream = options.log_stream.take();
+    let log_command = options.log_command;
     let option_args = options.into_args();
 
     // Check to make sure that the executable path exists and is a file,
@@ -478,6 +482,19 @@ pub async fn convert(
         command.creation_flags(CREATE_NO_WINDOW.0);
     }
 
+    let initial_log_lines: Vec<LogLine> = {
+        let mut initial_log_lines: Vec<LogLine> = Vec::new();
+        if log_command {
+            let command_log_line =
+                LogLine::Info(format!("> bspc {}", pretty_format_args(&debug_args)));
+            if let Some(log_stream) = &log_stream {
+                let _send_err = log_stream.send(command_log_line.clone()).await;
+            }
+            initial_log_lines.push(command_log_line);
+        }
+        initial_log_lines
+    };
+
     // Spawn the child process
     let mut child = TokioCommand::from(command)
         .spawn()
@@ -502,6 +519,13 @@ pub async fn convert(
         };
 
         let (exit, logs) = tokio::try_join!(wait_future, consume_log_future)?;
+        let logs = {
+            // Prepend initial_log_lines
+            let mut constructed_logs = Vec::with_capacity(initial_log_lines.len() + logs.len());
+            constructed_logs.extend(initial_log_lines);
+            constructed_logs.extend(logs);
+            constructed_logs
+        };
 
         // Drop the pipe after `try_join` to mirror Tokio's implementation of
         // `Child::wait_with_output`:
@@ -606,4 +630,28 @@ pub async fn convert(
     }
 
     Ok(output)
+}
+
+/// Performs best-effort "pretty-printing" of a sequence of arguments,
+/// attempting to produce an output where the placement of any special
+/// (i.e. whitespace, quote, control) characters can be easily discerned.
+fn pretty_format_args<I, S>(args: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter()
+        .map(|a| {
+            let a = a.as_ref();
+            if a.contains(char::is_whitespace) || a.contains(char::is_control) || a.contains('"') {
+                // This will escape any quotes/control characters in the string,
+                // and wrap the string in quotes (in the style of Rust source
+                // code):
+                format!("{:?}", a)
+            } else {
+                a.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
