@@ -108,6 +108,7 @@ pub mod logs;
 
 use crate::logs::{LogLine, UnknownArgumentLine};
 use derive_builder::UninitializedFieldError;
+use std::borrow::Borrow;
 use std::ffi::OsString;
 use std::future::Future;
 use std::io::Error as IoError;
@@ -121,7 +122,7 @@ use tokio_util::sync::CancellationToken;
 /// Callback used by [`Command::Other`].
 ///
 /// Accepts a the temporary directory that can be used to write files to.
-pub type CommandArgumentBuilder = Box<
+pub type CommandArgumentBuilder<'a> = Box<
     dyn FnOnce(
             &TempDir,
         ) -> Box<
@@ -129,11 +130,14 @@ pub type CommandArgumentBuilder = Box<
                 + Send
                 + Sync
                 + Unpin
-                // The builder function can't borrow the TempDir argument, but
-                // this is fine because any operations on it are synchronous.
-                + 'static,
+                // For simplicity, the future returned by the builder function
+                // can't borrow the TempDir argument, but this is probably fine
+                // in practice because any operations on it are synchronous
+                // (and so it can be dropped before constructing the future).
+                + 'a,
         > + Send
-        + Sync,
+        + Sync
+        + 'a,
 >;
 
 /// The subcommand to pass to the BSPC executable.
@@ -157,7 +161,7 @@ pub enum Command<'a> {
     /// This is an asynchronous callback that accepts the temporary directory
     /// that can be used to write files to, and returns a future that resolves
     /// to a list of arguments to pass to the BSPC executable (or an error).
-    Other(CommandArgumentBuilder),
+    Other(CommandArgumentBuilder<'a>),
 }
 
 impl<'a> Command<'a> {
@@ -485,15 +489,18 @@ pub async fn convert(
     let initial_log_lines: Vec<LogLine> = {
         let mut initial_log_lines: Vec<LogLine> = Vec::new();
         if log_command {
-            let command_log_line =
-                LogLine::Info(format!("> bspc {}", pretty_format_args(&debug_args)));
-            if let Some(log_stream) = &log_stream {
-                let _send_err = log_stream.send(command_log_line.clone()).await;
-            }
-            initial_log_lines.push(command_log_line);
+            initial_log_lines.push(LogLine::Info(format!(
+                "> bspc {}",
+                pretty_format_args(&debug_args)
+            )));
         }
         initial_log_lines
     };
+    if let Some(log_stream) = &log_stream {
+        for line in &initial_log_lines {
+            let _send_err = log_stream.send(line.clone()).await;
+        }
+    }
 
     // Spawn the child process
     let mut child = TokioCommand::from(command)
@@ -640,16 +647,35 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
+    // Use a helper enum to avoid allocating a new string for arguments that
+    // don't need to be quoted.
+    enum OriginalOrFormatted<S> {
+        Original(S),
+        Formatted(String),
+    }
+
+    impl<S: AsRef<str>> Borrow<str> for OriginalOrFormatted<S> {
+        fn borrow(&self) -> &str {
+            match self {
+                OriginalOrFormatted::Original(s) => s.as_ref(),
+                OriginalOrFormatted::Formatted(s) => s.as_str(),
+            }
+        }
+    }
+
     args.into_iter()
-        .map(|a| {
-            let a = a.as_ref();
-            if a.contains(char::is_whitespace) || a.contains(char::is_control) || a.contains('"') {
+        .map(|arg| {
+            let arg_ref = arg.as_ref();
+            if arg_ref.contains(char::is_whitespace)
+                || arg_ref.contains(char::is_control)
+                || arg_ref.contains('"')
+            {
                 // This will escape any quotes/control characters in the string,
                 // and wrap the string in quotes (in the style of Rust source
                 // code):
-                format!("{:?}", a)
+                OriginalOrFormatted::Formatted(format!("{:?}", arg_ref))
             } else {
-                a.to_owned()
+                OriginalOrFormatted::Original(arg)
             }
         })
         .collect::<Vec<_>>()
